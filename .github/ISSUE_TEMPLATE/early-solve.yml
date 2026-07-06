@@ -1,0 +1,83 @@
+name: Early Solve (≤4 guesses)
+description: Report solving Counterdle in 4 guesses or fewer — this may indicate a bug in the adversarial algorithm.
+title: "Early solve: [WORD1] → [WORD2] → ..."
+labels: ["early-solve", "bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting this! Counterdle's algorithm is designed so that optimal play should always require at least 5 guesses. If you solved it in 4 or fewer, that may indicate a gap in the adversarial strategy.
+
+        Please fill in each guess below. For colors, use 🟩 (green/correct), 🟨 (yellow/present), ⬛ (grey/absent).
+
+  - type: input
+    id: guess1
+    attributes:
+      label: Guess 1
+      description: The word you guessed
+      placeholder: e.g. crane
+    validations:
+      required: true
+
+  - type: input
+    id: colors1
+    attributes:
+      label: Colors for Guess 1
+      description: One emoji per letter — 🟩 green, 🟨 yellow, ⬛ grey
+      placeholder: e.g. ⬛🟨⬛🟩⬛
+    validations:
+      required: true
+
+  - type: input
+    id: guess2
+    attributes:
+      label: Guess 2
+      placeholder: e.g. slate
+    validations:
+      required: true
+
+  - type: input
+    id: colors2
+    attributes:
+      label: Colors for Guess 2
+      placeholder: e.g. ⬛🟩🟨⬛⬛
+    validations:
+      required: true
+
+  - type: input
+    id: guess3
+    attributes:
+      label: Guess 3
+      placeholder: e.g. drive
+
+  - type: input
+    id: colors3
+    attributes:
+      label: Colors for Guess 3
+      placeholder: e.g. 🟩🟩🟩🟩🟩
+
+  - type: input
+    id: guess4
+    attributes:
+      label: Guess 4 (if applicable)
+
+  - type: input
+    id: colors4
+    attributes:
+      label: Colors for Guess 4 (if applicable)
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Game mode
+      options:
+        - Normal mode
+        - Hard mode
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional notes
+      description: Anything else worth mentioning — e.g. did you use the Random button?

@@ -1,0 +1,54 @@
+name: Bug Report / Feature Request
+description: Report a bug or suggest an improvement.
+title: "[Bug/Feature] "
+labels: []
+body:
+  - type: dropdown
+    id: type
+    attributes:
+      label: Type
+      options:
+        - Bug report
+        - Feature request
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened, or what would you like to see?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce (for bugs)
+      description: How can we reproduce the issue? Leave blank for feature requests.
+      placeholder: |
+        1. Go to ...
+        2. Guess ...
+        3. See error
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior (for bugs)
+      description: What did you expect to happen?
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Game mode (if applicable)
+      options:
+        - Normal mode
+        - Hard mode
+        - Not applicable
+
+  - type: input
+    id: browser
+    attributes:
+      label: Browser / device (for bugs)
+      placeholder: e.g. Chrome 124 on macOS

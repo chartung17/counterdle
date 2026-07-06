@@ -52,9 +52,9 @@ export default function Home() {
     }, 600);
   };
 
-  const submitGuess = useCallback(() => {
+  const submitWord = useCallback((word: string) => {
     if (gameState !== "playing") return;
-    const word = currentInput.toLowerCase().trim();
+    word = word.toLowerCase().trim();
 
     if (word.length !== WORD_LENGTH) {
       showError(`Need ${WORD_LENGTH} letters`);
@@ -96,7 +96,11 @@ export default function Home() {
         setGameState("won");
       }
     }, 10);
-  }, [currentInput, pool, guesses, gameState, hardMode]);
+  }, [pool, guesses, gameState, hardMode]);
+
+  const submitGuess = useCallback(() => {
+    submitWord(currentInput);
+  }, [currentInput, submitWord]);
 
   const handleBackspace = useCallback(() => {
     setCurrentInput((prev) => prev.slice(0, -1));
@@ -116,18 +120,15 @@ export default function Home() {
   const handleRandomGuess = useCallback(() => {
     if (gameState !== "playing" || thinking) return;
     if (hardMode) {
-      // In hard mode: random legal guess (any valid word satisfying revealed clues)
       const legal = filterLegalGuesses(GUESSES, clueRef.current);
       if (legal.length === 0) return;
-      setCurrentInput(legal[Math.floor(Math.random() * legal.length)]);
+      submitWord(legal[Math.floor(Math.random() * legal.length)]);
     } else {
-      // In normal mode: random word from remaining possible answers, excluding
-      // words already guessed this game
       const candidates = ANSWERS.filter((w) => !guessedWordsRef.current.has(w));
       if (candidates.length === 0) return;
-      setCurrentInput(candidates[Math.floor(Math.random() * candidates.length)]);
+      submitWord(candidates[Math.floor(Math.random() * candidates.length)]);
     }
-  }, [gameState, thinking, hardMode]);
+  }, [gameState, thinking, hardMode, submitWord]);
 
   const resetGame = useCallback((newHardMode?: boolean) => {
     setPool(ANSWERS);
@@ -208,6 +209,12 @@ export default function Home() {
           </p>
           <p style={{ marginTop: 10 }}>
             Valid guesses: <strong style={{ color: "var(--text)" }}>14,855</strong> words. Possible answers: <strong style={{ color: "var(--text)" }}>2,308</strong> words. The counter shows how many answers are still consistent with every clue so far.
+          </p>
+          <p style={{ marginTop: 10 }}>
+            <a href="https://laurentlessard.com/solving-wordle/" target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)" }}>It has been proven</a>{" "}
+            that no strategy can guarantee solving Wordle in 4 guesses or fewer, and that a 5-guess guarantee is achievable — so with optimal play, Counterdle should take at least 5 guesses. If you solve it in 4 or fewer, please{" "}
+            <a href="https://github.com/chartung17/counterdle/issues" target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)" }}>open a GitHub issue</a>{" "}
+            with the words you guessed and the colors you received!
           </p>
           <p style={{ marginTop: 10 }}>
             Counterdle is{" "}

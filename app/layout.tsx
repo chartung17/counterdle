@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import Script from "next/script";
 
 export const metadata: Metadata = {
   title: "Counterdle",
@@ -13,6 +14,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
+      <Script data-goatcounter="https://chartung.goatcounter.com/count" async src="//gc.zgo.at/count.js"></Script>
       <body>{children}</body>
     </html>
   );

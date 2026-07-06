@@ -588,7 +588,5 @@ export function chooseAdversarialBucket(
 
   const chosen = tied[Math.floor(Math.random() * tied.length)];
   const end = Date.now();
-  console.log(tied)
-  console.log(((end-start) / 1000).toFixed(1));
   return { pattern: intToPattern(chosen.patInt), nextPool: chosen.words };
 }

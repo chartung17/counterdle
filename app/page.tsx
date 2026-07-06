@@ -38,10 +38,10 @@ export default function Home() {
   const [revealedWord, setRevealedWord] = useState<string | null>(null);
   const [thinking, setThinking] = useState(false);
 
-  // Accumulated hard-mode clue state, tracked independently of guesses so
-  // we can validate input even mid-game.
   const clueRef = useRef<RevealedClue>(emptyClue());
   const guessSet = useRef<Set<string>>(new Set(GUESSES));
+  // Track words guessed this game for random-guess exclusion in normal mode
+  const guessedWordsRef = useRef<Set<string>>(new Set());
 
   const showError = (msg: string) => {
     setError(msg);
@@ -71,26 +71,18 @@ export default function Home() {
       return;
     }
 
-    // Legal guesses the adversary should assume the player could make on
-    // FUTURE turns, used to compute genuine difficulty. In hard mode this
-    // is restricted to words consistent with clues revealed up through
-    // (and including) this guess's eventual result — but since we don't
-    // know the result yet, we pass the legal set as of clues BEFORE this
-    // guess; the adversary will incorporate the new clue when scoring the
-    // bucket it picks, since buckets are already partitioned by pattern.
     const legalGuesses = hardMode
       ? filterLegalGuesses(GUESSES, clueRef.current)
       : GUESSES;
 
     setThinking(true);
-    // Defer to next tick so the "thinking" state can paint before the
-    // (synchronous, occasionally slow) adversarial computation runs.
     setTimeout(() => {
       const { pattern, nextPool } = chooseAdversarialBucket(word, pool, legalGuesses);
       const newGuess: GuessResult = { word, pattern };
       const rowIndex = guesses.length;
 
       clueRef.current = accumulateClue(clueRef.current, word, pattern);
+      guessedWordsRef.current.add(word);
 
       setFlippingRow(rowIndex);
       setTimeout(() => setFlippingRow(null), 400);
@@ -110,12 +102,9 @@ export default function Home() {
     setCurrentInput((prev) => prev.slice(0, -1));
   }, []);
 
-  const handleLetter = useCallback(
-    (letter: string) => {
-      setCurrentInput((prev) => (prev.length < WORD_LENGTH ? prev + letter : prev));
-    },
-    []
-  );
+  const handleLetter = useCallback((letter: string) => {
+    setCurrentInput((prev) => (prev.length < WORD_LENGTH ? prev + letter : prev));
+  }, []);
 
   const handleGiveUp = useCallback(() => {
     if (gameState !== "playing" || pool.length === 0) return;
@@ -124,10 +113,45 @@ export default function Home() {
     setGameState("gaveup");
   }, [gameState, pool]);
 
-  // Global keyboard listener — no input element to focus.
+  const handleRandomGuess = useCallback(() => {
+    if (gameState !== "playing" || thinking) return;
+    if (hardMode) {
+      // In hard mode: random legal guess (any valid word satisfying revealed clues)
+      const legal = filterLegalGuesses(GUESSES, clueRef.current);
+      if (legal.length === 0) return;
+      setCurrentInput(legal[Math.floor(Math.random() * legal.length)]);
+    } else {
+      // In normal mode: random word from remaining possible answers, excluding
+      // words already guessed this game
+      const candidates = ANSWERS.filter((w) => !guessedWordsRef.current.has(w));
+      if (candidates.length === 0) return;
+      setCurrentInput(candidates[Math.floor(Math.random() * candidates.length)]);
+    }
+  }, [gameState, thinking, hardMode]);
+
+  const resetGame = useCallback((newHardMode?: boolean) => {
+    setPool(ANSWERS);
+    setGuesses([]);
+    setCurrentInput("");
+    setGameState("playing");
+    setError(null);
+    setRevealedWord(null);
+    clueRef.current = emptyClue();
+    guessedWordsRef.current = new Set();
+    if (newHardMode !== undefined) setHardMode(newHardMode);
+  }, []);
+
+  // Global keyboard listener
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (gameState !== "playing" || thinking) return;
+      if (thinking) return;
+      if (gameState !== "playing") {
+        // Only handle Enter to restart when game is over
+        if (e.key === "Enter" && (gameState === "won" || gameState === "gaveup")) {
+          resetGame();
+        }
+        return;
+      }
       if (e.key === "Enter") {
         submitGuess();
       } else if (e.key === "Backspace") {
@@ -138,25 +162,13 @@ export default function Home() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [gameState, thinking, submitGuess, handleBackspace, handleLetter]);
-
-  const resetGame = (newHardMode?: boolean) => {
-    setPool(ANSWERS);
-    setGuesses([]);
-    setCurrentInput("");
-    setGameState("playing");
-    setError(null);
-    setRevealedWord(null);
-    clueRef.current = emptyClue();
-    if (newHardMode !== undefined) setHardMode(newHardMode);
-  };
+  }, [gameState, thinking, submitGuess, handleBackspace, handleLetter, resetGame]);
 
   const currentRowIndex = guesses.length;
   const numRows = Math.max(
     guesses.length + (gameState === "playing" ? 1 : 0),
     MAX_VISIBLE_ROWS_MIN
   );
-
   const overlayVisible = gameState === "won" || gameState === "gaveup";
 
   return (
@@ -164,12 +176,9 @@ export default function Home() {
       {/* Header */}
       <header style={{ width: "100%", maxWidth: 480, display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: "1px solid var(--border)", paddingBottom: 16, marginBottom: 24 }}>
         <div>
-          <h1 style={{ fontSize: 22, fontWeight: 700, letterSpacing: "0.15em", color: "var(--accent)" }}>
-            COUNTERDLE
-          </h1>
+          <h1 style={{ fontSize: 22, fontWeight: 700, letterSpacing: "0.15em", color: "var(--accent)" }}>COUNTERDLE</h1>
           <p style={{ fontSize: 11, color: "var(--muted)", letterSpacing: "0.08em", marginTop: 2 }}>adversarial word game</p>
         </div>
-
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           {gameState === "playing" && (
             <div className="counter-pulse" style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 12px", fontSize: 12, color: "var(--muted)", letterSpacing: "0.05em" }}>
@@ -185,18 +194,32 @@ export default function Home() {
       {showInfo && (
         <div style={{ width: "100%", maxWidth: 480, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: 20, marginBottom: 20, fontSize: 13, lineHeight: 1.7, color: "var(--muted)" }}>
           <p style={{ color: "var(--text)", fontWeight: 600, marginBottom: 8 }}>How Counterdle works</p>
-          <p>There&apos;s no secret word at the start. After each guess, the game looks at every possible response and picks the one that <em style={{ color: "var(--accent)" }}>maximizes how many guesses you&apos;ll still need</em> — using exact worst-case search for small remaining-word sets, and an information-theoretic estimate for larger ones. Responses that are roughly equally devious are chosen among <em style={{ color: "var(--accent)" }}>at random</em>, so identical guesses can lead to different games.</p>
-          <p style={{ marginTop: 10 }}><strong style={{ color: "var(--text)" }}>Hard mode</strong> requires every guess to reuse all clues revealed so far (any green letter must stay in place; any yellow letter must appear somewhere). This also makes the game harder, since the adversary knows you have fewer escape routes.</p>
-          <p style={{ marginTop: 10 }}>Valid guesses: <strong style={{ color: "var(--text)" }}>14,855</strong> words. Possible answers: <strong style={{ color: "var(--text)" }}>2,308</strong> words. The counter shows how many answers are still consistent with every clue so far.</p>
+          <p>
+            Counterdle is inspired by{" "}
+            <a href="https://qntm.org/files/absurdle/absurdle.html" target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)" }}>Absurdle</a>.
+            There&apos;s no secret word at the start. After each guess, the game picks the response that{" "}
+            <em style={{ color: "var(--accent)" }}>maximizes how many guesses you&apos;ll still need</em>{" "}
+            — using exact worst-case search for small remaining-word sets, and a calibrated heuristic for larger ones.
+            Responses that are roughly equally devious are chosen among{" "}
+            <em style={{ color: "var(--accent)" }}>at random</em>, so identical guesses can lead to different games.
+          </p>
+          <p style={{ marginTop: 10 }}>
+            <strong style={{ color: "var(--text)" }}>Hard mode</strong> requires every guess to reuse all clues revealed so far (green letters must stay in place; yellow letters must appear somewhere). The adversary also knows you have fewer escape routes and adjusts accordingly.
+          </p>
+          <p style={{ marginTop: 10 }}>
+            Valid guesses: <strong style={{ color: "var(--text)" }}>14,855</strong> words. Possible answers: <strong style={{ color: "var(--text)" }}>2,308</strong> words. The counter shows how many answers are still consistent with every clue so far.
+          </p>
+          <p style={{ marginTop: 10 }}>
+            Counterdle is{" "}
+            <a href="https://github.com/chartung17/counterdle" target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)" }}>open source</a>.
+          </p>
           <div style={{ marginTop: 14, display: "flex", alignItems: "center", gap: 10 }}>
             <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--text)", cursor: guesses.length === 0 ? "pointer" : "not-allowed", opacity: guesses.length === 0 ? 1 : 0.5 }}>
               <input
                 type="checkbox"
                 checked={hardMode}
                 disabled={guesses.length > 0}
-                onChange={(e) => {
-                  if (guesses.length === 0) setHardMode(e.target.checked);
-                }}
+                onChange={(e) => { if (guesses.length === 0) setHardMode(e.target.checked); }}
               />
               Hard mode
             </label>
@@ -208,7 +231,7 @@ export default function Home() {
         </div>
       )}
 
-      {/* Board + overlay container */}
+      {/* Board + overlay */}
       <div style={{ position: "relative", marginBottom: 20 }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 6, filter: overlayVisible ? "blur(2px)" : "none", transition: "filter 0.2s" }}>
           {Array.from({ length: numRows }).map((_, rowIdx) => {
@@ -244,37 +267,10 @@ export default function Home() {
           })}
         </div>
 
-        {/* Backdrop + overlay for win/give-up */}
         {overlayVisible && (
           <>
-            <div
-              className="backdrop-fade"
-              style={{
-                position: "absolute",
-                top: -12,
-                left: -12,
-                right: -12,
-                bottom: -12,
-                background: "rgba(13, 13, 15, 0.55)",
-                borderRadius: 16,
-              }}
-            />
-            <div
-              className="overlay-pop"
-              style={{
-                position: "absolute",
-                top: "50%",
-                left: "50%",
-                width: "calc(100% + 24px)",
-                maxWidth: 320,
-                background: "var(--surface)",
-                border: `1px solid ${gameState === "won" ? "var(--correct)" : "var(--border)"}`,
-                borderRadius: 14,
-                padding: 24,
-                textAlign: "center",
-                boxShadow: "0 12px 40px rgba(0,0,0,0.5)",
-              }}
-            >
+            <div className="backdrop-fade" style={{ position: "absolute", top: -12, left: -12, right: -12, bottom: -12, background: "rgba(13, 13, 15, 0.55)", borderRadius: 16 }} />
+            <div className="overlay-pop" style={{ position: "absolute", top: "50%", left: "50%", width: "calc(100% + 24px)", maxWidth: 320, background: "var(--surface)", border: `1px solid ${gameState === "won" ? "var(--correct)" : "var(--border)"}`, borderRadius: 14, padding: 24, textAlign: "center", boxShadow: "0 12px 40px rgba(0,0,0,0.5)" }}>
               {gameState === "won" && (
                 <>
                   <div style={{ fontSize: 28, marginBottom: 8 }}>🎉</div>
@@ -283,29 +279,18 @@ export default function Home() {
                   </p>
                   <p style={{ fontSize: 13, color: "var(--muted)", marginBottom: 20 }}>
                     the answer was:{" "}
-                    <span style={{ color: "var(--text)", fontWeight: 700, textTransform: "uppercase" }}>
-                      {guesses[guesses.length - 1].word}
-                    </span>
+                    <span style={{ color: "var(--text)", fontWeight: 700, textTransform: "uppercase" }}>{guesses[guesses.length - 1].word}</span>
                   </p>
                 </>
               )}
               {gameState === "gaveup" && (
                 <>
                   <div style={{ fontSize: 28, marginBottom: 8 }}>🏳️</div>
-                  <p style={{ fontSize: 16, fontWeight: 700, color: "var(--text)", letterSpacing: "0.1em", marginBottom: 4 }}>
-                    you gave up
-                  </p>
+                  <p style={{ fontSize: 16, fontWeight: 700, color: "var(--text)", letterSpacing: "0.1em", marginBottom: 4 }}>you gave up</p>
                   <p style={{ fontSize: 13, color: "var(--muted)", marginBottom: 20 }}>
                     one word that fit every clue was:{" "}
-                    <span style={{ color: "var(--text)", fontWeight: 700, textTransform: "uppercase" }}>
-                      {revealedWord}
-                    </span>
-                    {pool.length > 1 && (
-                      <>
-                        <br />
-                        <span style={{ fontSize: 11 }}>({pool.length} words were still possible)</span>
-                      </>
-                    )}
+                    <span style={{ color: "var(--text)", fontWeight: 700, textTransform: "uppercase" }}>{revealedWord}</span>
+                    {pool.length > 1 && <><br /><span style={{ fontSize: 11 }}>({pool.length} words were still possible)</span></>}
                   </p>
                 </>
               )}
@@ -315,6 +300,7 @@ export default function Home() {
               >
                 PLAY AGAIN
               </button>
+              <p style={{ marginTop: 10, fontSize: 11, color: "var(--muted)" }}>or press Enter</p>
             </div>
           </>
         )}
@@ -328,9 +314,7 @@ export default function Home() {
       )}
 
       {thinking && (
-        <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12, letterSpacing: "0.05em" }}>
-          thinking...
-        </div>
+        <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12, letterSpacing: "0.05em" }}>thinking...</div>
       )}
 
       {/* On-screen keyboard */}
@@ -342,6 +326,7 @@ export default function Home() {
         onBackspace={handleBackspace}
         onSubmit={submitGuess}
         onGiveUp={handleGiveUp}
+        onRandomGuess={handleRandomGuess}
       />
     </main>
   );
@@ -355,6 +340,7 @@ function OnScreenKeyboard({
   onBackspace,
   onSubmit,
   onGiveUp,
+  onRandomGuess,
 }: {
   guesses: GuessResult[];
   currentInput: string;
@@ -363,6 +349,7 @@ function OnScreenKeyboard({
   onBackspace: () => void;
   onSubmit: () => void;
   onGiveUp: () => void;
+  onRandomGuess: () => void;
 }) {
   const rows = [
     ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"],
@@ -382,7 +369,7 @@ function OnScreenKeyboard({
     }
   }
 
-  const keyStyle = (state: TileState | undefined, extraWidth = 32): React.CSSProperties => {
+  const keyStyle = (state: TileState | undefined, width = 32): React.CSSProperties => {
     let bg = "var(--keyboard-unguessed)";
     let fg = "var(--text)";
     let border = "var(--border)";
@@ -390,7 +377,7 @@ function OnScreenKeyboard({
     else if (state === "present") { bg = "var(--present)"; fg = "var(--present-fg)"; border = "var(--present)"; }
     else if (state === "absent") { bg = "var(--absent)"; fg = "var(--absent-fg)"; border = "var(--absent)"; }
     return {
-      width: extraWidth,
+      width,
       height: 44,
       display: "flex",
       alignItems: "center",
@@ -422,7 +409,6 @@ function OnScreenKeyboard({
               onClick={onGiveUp}
               disabled={disabled}
               style={{ ...keyStyle(undefined, 52), fontSize: 10, letterSpacing: "0.03em" }}
-              title="Give up"
             >
               GIVE UP
             </button>
@@ -442,19 +428,29 @@ function OnScreenKeyboard({
               onClick={onBackspace}
               disabled={!canBackspace}
               style={{ ...keyStyle(undefined, 52), opacity: canBackspace ? 1 : 0.35, cursor: canBackspace ? "pointer" : "default" }}
-              title="Backspace"
             >
               ⌫
             </button>
           )}
         </div>
       ))}
-      <div style={{ display: "flex", justifyContent: "center" }}>
+      <div style={{ display: "flex", gap: 6, justifyContent: "center" }}>
+        <button
+          onClick={onRandomGuess}
+          disabled={disabled}
+          style={{
+            ...keyStyle(undefined, 120),
+            fontSize: 11,
+            letterSpacing: "0.04em",
+          }}
+        >
+          RANDOM
+        </button>
         <button
           onClick={onSubmit}
           disabled={!canSubmit}
           style={{
-            ...keyStyle(undefined, 200),
+            ...keyStyle(undefined, 160),
             background: canSubmit ? "var(--accent)" : "var(--keyboard-unguessed)",
             color: canSubmit ? "#0d0d0f" : "var(--muted)",
             border: "none",

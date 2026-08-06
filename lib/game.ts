@@ -541,7 +541,7 @@ export function scoreBucketDifficulty(
 // Relative tie threshold: buckets scoring within this fraction of the best
 // score are considered equally hard and chosen among at random. A wider
 // threshold makes the adversary's behavior less deterministic.
-const TIE_THRESHOLD = 0.12;
+const TIE_THRESHOLD = 0.1;
 
 export function chooseAdversarialBucket(
   guess: string,
@@ -583,8 +583,8 @@ export function chooseAdversarialBucket(
   }
 
   // Treat anything within TIE_THRESHOLD (relative) of the best as tied.
-  const cutoff = bestScore * (1 - TIE_THRESHOLD);
-  const tied = scored.filter((s) => s.score >= cutoff);
+  const cutoff = Math.max(bestScore * (1 - TIE_THRESHOLD), Math.ceil(bestScore) - 1);
+  const tied = scored.filter((s) => s.score > cutoff);
 
   const chosen = tied[Math.floor(Math.random() * tied.length)];
   const end = Date.now();

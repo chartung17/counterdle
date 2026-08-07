@@ -582,7 +582,7 @@ export function chooseAdversarialBucket(
     if (score > bestScore) bestScore = score;
   }
 
-  // Treat anything within TIE_THRESHOLD (relative) of the best as tied.
+  // Treat anything within TIE_THRESHOLD (relative) of the best as tied, as long as it has the same ceiling.
   const cutoff = Math.max(bestScore * (1 - TIE_THRESHOLD), Math.ceil(bestScore) - 1);
   const tied = scored.filter((s) => s.score > cutoff);
 

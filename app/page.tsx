@@ -18,6 +18,13 @@ import {
 const WORD_LENGTH = 5;
 const MAX_VISIBLE_ROWS_MIN = 6;
 
+// Spoken names for tile states (colour alone doesn't reach screen readers).
+const STATE_LABELS: Record<TileState, string> = {
+  correct: "correct spot",
+  present: "in the word, wrong spot",
+  absent: "not in the word",
+};
+
 type GuessResult = {
   word: string;
   pattern: Pattern;
@@ -193,7 +200,7 @@ export default function Home() {
               <span> possible</span>
             </div>
           )}
-          <button onClick={() => setShowInfo(!showInfo)} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 8, color: "var(--muted)", cursor: "pointer", padding: "6px 10px", fontSize: 14 }}>?</button>
+          <button onClick={() => setShowInfo(!showInfo)} aria-label="How to play" aria-expanded={showInfo} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 8, color: "var(--muted)", cursor: "pointer", padding: "6px 10px", fontSize: 14 }}>?</button>
         </div>
       </header>
 
@@ -254,7 +261,13 @@ export default function Home() {
             const isShaking = isCurrent && shakingRow;
 
             return (
-              <div key={rowIdx} className={isShaking ? "row-shake" : ""} style={{ display: "flex", gap: 5 }}>
+              <div
+                key={rowIdx}
+                className={isShaking ? "row-shake" : ""}
+                style={{ display: "flex", gap: 5 }}
+                role="group"
+                aria-label={guess ? `Guess ${rowIdx + 1}: ${guess.word.toUpperCase()}` : isCurrent ? "Current guess" : `Row ${rowIdx + 1}, empty`}
+              >
                 {Array.from({ length: WORD_LENGTH }).map((_, colIdx) => {
                   const guessedLetter = guess?.word[colIdx];
                   const currentLetter = isCurrent ? currentInput[colIdx] : undefined;
@@ -270,7 +283,7 @@ export default function Home() {
                   else if (state === "absent") { bg = "var(--absent)"; fg = "var(--absent-fg)"; borderColor = "var(--absent)"; }
 
                   return (
-                    <div key={colIdx} className={isFlipping ? "tile-flip" : ""} style={{ width: 56, height: 56, display: "flex", alignItems: "center", justifyContent: "center", border: `2px solid ${borderColor}`, borderRadius: 8, fontSize: 22, fontWeight: 700, letterSpacing: "0.05em", background: bg, color: fg, textTransform: "uppercase", transition: "background 0.15s, border-color 0.15s" }}>
+                    <div key={colIdx} className={isFlipping ? "tile-flip" : ""} role="img" aria-label={letter ? `${letter.toUpperCase()}${state ? `, ${STATE_LABELS[state]}` : ""}` : "empty"} style={{ width: 56, height: 56, display: "flex", alignItems: "center", justifyContent: "center", border: `2px solid ${borderColor}`, borderRadius: 8, fontSize: 22, fontWeight: 700, letterSpacing: "0.05em", background: bg, color: fg, textTransform: "uppercase", transition: "background 0.15s, border-color 0.15s" }}>
                       {letter}
                     </div>
                   );
@@ -321,13 +334,13 @@ export default function Home() {
 
       {/* Error */}
       {error && (
-        <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 16px", fontSize: 13, color: "var(--accent)", marginBottom: 16, letterSpacing: "0.05em" }}>
+        <div role="alert" style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 16px", fontSize: 13, color: "var(--accent)", marginBottom: 16, letterSpacing: "0.05em" }}>
           {error}
         </div>
       )}
 
       {thinking && (
-        <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12, letterSpacing: "0.05em" }}>thinking...</div>
+        <div role="status" style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12, letterSpacing: "0.05em" }}>thinking...</div>
       )}
 
       {/* On-screen keyboard */}
@@ -432,17 +445,19 @@ function OnScreenKeyboard({
               onClick={() => !disabled && onLetter(key)}
               disabled={disabled}
               style={keyStyle(letterStates[key])}
+              aria-label={letterStates[key] ? `${key.toUpperCase()}, ${STATE_LABELS[letterStates[key]]}` : key.toUpperCase()}
             >
               {key}
             </button>
           ))}
           {ri === 2 && (
             <button
+              aria-label="Backspace"
               onClick={onBackspace}
               disabled={!canBackspace}
               style={{ ...keyStyle(undefined, 52), opacity: canBackspace ? 1 : 0.35, cursor: canBackspace ? "pointer" : "default" }}
             >
-              ⌫
+              <span aria-hidden="true">⌫</span>
             </button>
           )}
         </div>

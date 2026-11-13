@@ -11,7 +11,7 @@ import {
   chooseAdversarialBucket,
   emptyClue,
   accumulateClue,
-  isLegalHardModeGuess,
+  hardModeViolation,
   filterLegalGuesses,
 } from "@/lib/game";
 
@@ -66,8 +66,9 @@ export default function Home() {
       return;
     }
 
-    if (hardMode && !isLegalHardModeGuess(word, clueRef.current)) {
-      showError("Must use revealed clues");
+    const violation = hardMode ? hardModeViolation(word, clueRef.current) : null;
+    if (violation) {
+      showError(violation);
       return;
     }
 

@@ -31,14 +31,15 @@
 export type TileState = "correct" | "present" | "absent";
 export type Pattern = TileState[];
 
+// Hard-mode constraints revealed so far, following NYT Wordle's rule: every
+// green letter must stay in its spot, and every revealed letter (green or
+// yellow) must be reused, as many times as it has been revealed. Grey letters
+// may be reused, and a yellow letter may go back in the same spot.
 export type RevealedClue = {
   // Position -> letter that's confirmed correct (green) there.
   greens: (string | null)[]; // length 5
-  // Letters confirmed present somewhere (yellow), with minimum count known.
+  // Letter -> how many times it must appear in every later guess.
   minCounts: Record<string, number>;
-  // Positions where a given letter is known NOT to be (yellow elsewhere, or
-  // absent entirely if minCounts[letter] is undefined/0).
-  excludedPositions: Record<string, Set<number>>;
 };
 
 // Encode a pattern as a base-3 integer (0–242) for fast hashing/comparison.
@@ -69,8 +70,8 @@ export function isWin(pattern: Pattern): boolean {
 // Hard mode: legal-guess filtering
 // ---------------------------------------------------------------------------
 
-// Merge a new (guess, pattern) result into the accumulated revealed-clue
-// state, used to filter which future guesses are legal under hard mode.
+// Merge a new (guess, pattern) result into the accumulated hard-mode
+// constraints.
 export function accumulateClue(
   prev: RevealedClue,
   guess: string,
@@ -78,73 +79,42 @@ export function accumulateClue(
 ): RevealedClue {
   const greens = [...prev.greens];
   const minCounts = { ...prev.minCounts };
-  const excludedPositions: Record<string, Set<number>> = {};
-  for (const [k, v] of Object.entries(prev.excludedPositions)) {
-    excludedPositions[k] = new Set(v);
-  }
-
-  // Count letters revealed as present (green or yellow) in this guess, to
-  // compute a minimum-occurrence count per letter.
-  const presentCounts: Record<string, number> = {};
-
+  // Letters revealed (green or yellow) in this guess, counted per letter: a
+  // guess with two yellow Es means every later guess needs two Es.
+  const revealed: Record<string, number> = {};
   for (let i = 0; i < 5; i++) {
     const letter = guess[i];
-    const state = pattern[i];
-    if (state === "correct") {
-      greens[i] = letter;
-      presentCounts[letter] = (presentCounts[letter] || 0) + 1;
-    } else if (state === "present") {
-      presentCounts[letter] = (presentCounts[letter] || 0) + 1;
-      if (!excludedPositions[letter]) excludedPositions[letter] = new Set();
-      excludedPositions[letter].add(i);
-    }
+    if (pattern[i] === "correct") greens[i] = letter;
+    if (pattern[i] !== "absent") revealed[letter] = (revealed[letter] || 0) + 1;
   }
-
-  // Grey (absent) tiles: the letter is confirmed NOT at this position. If
-  // the letter never appeared as green/yellow anywhere in this guess, it's
-  // confirmed absent from the word entirely, but we still only need the
-  // position-level exclusion to correctly filter future guesses — a
-  // zero-or-unset minCount already prevents requiring it, and any future
-  // guess placing that letter at THIS position should be rejected even if
-  // the letter is otherwise legitimately present elsewhere (duplicate
-  // letter case, e.g. "rower" with one R confirmed at the end and another
-  // R correctly marked absent at the front).
-  for (let i = 0; i < 5; i++) {
-    const letter = guess[i];
-    const state = pattern[i];
-    if (state === "absent") {
-      if (!excludedPositions[letter]) excludedPositions[letter] = new Set();
-      excludedPositions[letter].add(i);
-    }
-  }
-
-  for (const [letter, count] of Object.entries(presentCounts)) {
+  for (const [letter, count] of Object.entries(revealed)) {
     minCounts[letter] = Math.max(minCounts[letter] || 0, count);
   }
-
-  return { greens, minCounts, excludedPositions };
+  return { greens, minCounts };
 }
 
 export function emptyClue(): RevealedClue {
-  return { greens: Array(5).fill(null), minCounts: {}, excludedPositions: {} };
+  return { greens: Array(5).fill(null), minCounts: {} };
 }
 
-// Is `word` a legal hard-mode guess given everything revealed so far?
-export function isLegalHardModeGuess(word: string, clue: RevealedClue): boolean {
+const ORDINALS = ["1st", "2nd", "3rd", "4th", "5th"];
+
+// Why `word` breaks hard mode, in NYT's wording, or null if it's legal.
+export function hardModeViolation(word: string, clue: RevealedClue): string | null {
   for (let i = 0; i < 5; i++) {
-    if (clue.greens[i] && word[i] !== clue.greens[i]) return false;
+    const g = clue.greens[i];
+    if (g && word[i] !== g) return `${ORDINALS[i]} letter must be ${g.toUpperCase()}`;
   }
   const counts: Record<string, number> = {};
   for (const ch of word) counts[ch] = (counts[ch] || 0) + 1;
   for (const [letter, minCount] of Object.entries(clue.minCounts)) {
-    if ((counts[letter] || 0) < minCount) return false;
+    if ((counts[letter] || 0) < minCount) return `Guess must contain ${letter.toUpperCase()}`;
   }
-  for (const [letter, positions] of Object.entries(clue.excludedPositions)) {
-    for (const pos of positions) {
-      if (word[pos] === letter) return false;
-    }
-  }
-  return true;
+  return null;
+}
+
+export function isLegalHardModeGuess(word: string, clue: RevealedClue): boolean {
+  return hardModeViolation(word, clue) === null;
 }
 
 export function filterLegalGuesses(words: string[], clue: RevealedClue): string[] {
@@ -355,9 +325,6 @@ const PREFILTER_COUNT = 400;
 function clueKey(clue: RevealedClue): string {
   let s = clue.greens.map((g) => g ?? "_").join("");
   for (const letter of Object.keys(clue.minCounts).sort()) s += letter + clue.minCounts[letter];
-  for (const letter of Object.keys(clue.excludedPositions).sort()) {
-    s += "!" + letter + [...clue.excludedPositions[letter]].sort().join("");
-  }
   return s;
 }
 
@@ -369,10 +336,6 @@ function nodeKey(bucket: number[], ctx: SearchCtx): string {
 // Same rule as isLegalHardModeGuess, applied to a packed guess list.
 function filterGuessList(list: GuessList, clue: RevealedClue): GuessList {
   const green = clue.greens.map((g) => (g ? g.charCodeAt(0) - 97 : -1));
-  const excluded = new Int32Array(26); // letter -> bitmask of banned positions
-  for (const [letter, positions] of Object.entries(clue.excludedPositions)) {
-    for (const p of positions) excluded[letter.charCodeAt(0) - 97] |= 1 << p;
-  }
   const required = Object.entries(clue.minCounts)
     .filter(([, c]) => c > 0)
     .map(([letter, c]) => [letter.charCodeAt(0) - 97, c]);
@@ -382,8 +345,7 @@ function filterGuessList(list: GuessList, clue: RevealedClue): GuessList {
   outer: for (let j = 0; j < list.packed.length; j++) {
     const p = list.packed[j];
     for (let i = 0; i < 5; i++) {
-      const c = (p >>> (5 * i)) & 31;
-      if ((green[i] >= 0 && c !== green[i]) || excluded[c] & (1 << i)) continue outer;
+      if (green[i] >= 0 && ((p >>> (5 * i)) & 31) !== green[i]) continue outer;
     }
     if (required.length) {
       for (let i = 0; i < 5; i++) counts[(p >>> (5 * i)) & 31]++;

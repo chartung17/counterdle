@@ -77,7 +77,12 @@ export default function Home() {
 
     setThinking(true);
     setTimeout(() => {
-      const { pattern, nextPool } = chooseAdversarialBucket(word, pool, legalGuesses);
+      const { pattern, nextPool } = chooseAdversarialBucket(
+        word,
+        pool,
+        legalGuesses,
+        hardMode ? clueRef.current : null
+      );
       const newGuess: GuessResult = { word, pattern };
       const rowIndex = guesses.length;
 
@@ -200,7 +205,7 @@ export default function Home() {
             <a href="https://qntm.org/files/absurdle/absurdle.html" target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)" }}>Absurdle</a>.
             There&apos;s no secret word at the start. After each guess, the game picks the response that{" "}
             <em style={{ color: "var(--accent)" }}>maximizes how many guesses you&apos;ll still need</em>{" "}
-            — using exact worst-case search for small remaining-word sets, and a calibrated heuristic for larger ones.
+            — found with a worst-case search over every word you could guess next.
             Responses that are roughly equally devious are chosen among{" "}
             <em style={{ color: "var(--accent)" }}>at random</em>, so identical guesses can lead to different games.
           </p>

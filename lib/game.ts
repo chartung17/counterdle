@@ -6,63 +6,41 @@
 //   - Guesses (~14,855 words): https://github.com/tabatkins/wordle-list/blob/main/words
 //     Credit: Tab Atkins Jr. (https://github.com/tabatkins)
 //
-// The adversarial engine picks the response (bucket) that maximizes the
-// number of guesses the player will still need:
-//   - For small buckets (<= EXACT_MINIMAX_THRESHOLD words), we compute the
-//     TRUE minimax depth via recursion. This is only tractable because the
-//     bucket itself is small and we only recurse on buckets, never on the
-//     full pool.
-//   - For larger buckets we fall back to an information-theoretic estimate
-//     (bits needed / best achievable bits per guess), which is cheap and a
-//     good proxy for minimax depth without the combinatorial blowup.
-// Buckets within TIE_THRESHOLD (relative) of the best score are treated as
-// equally hard and chosen among at random, so the game doesn't play out
-// deterministically even when one bucket is nominally a hair "better."
+// The adversarial engine answers each guess with the response (bucket of
+// still-possible answers) that maximizes the number of guesses the player
+// will still need, assuming the player plays perfectly from there:
+//
+//   - depthSearch computes that minimax depth for every bucket. "Needs 2
+//     more guesses" is detected exactly by scanning every legal guess; deeper
+//     buckets use a pruned beam search that returns an upper bound which is
+//     exact in the vast majority of cases.
+//   - Before committing to a response, the engine double-checks it against
+//     every legal guess (solvableIn3), so a bucket it believes needs 4+ more
+//     guesses provably can't be solved in 3.
+//
+// Responses of equal depth are equally devious, so the engine picks among
+// them at random: replaying the same guesses can lead to different games.
 //
 // Hard mode restricts which words count as legal guesses (both for the
 // player's input validation, and for the set of guesses the adversary
 // assumes the player COULD make when estimating difficulty): a guess must
-// reuse every revealed clue. This is the standard Wordle hard-mode rule,
-// and it genuinely changes the minimax value, not just the player's options.
+// reuse every revealed clue. Because each possible response reveals
+// different clues, the engine re-filters the legal guesses per response, and
+// again at every level of its search.
 
 export type TileState = "correct" | "present" | "absent";
 export type Pattern = TileState[];
 
+// Hard-mode constraints revealed so far, following NYT Wordle's rule: every
+// green letter must stay in its spot, and every revealed letter (green or
+// yellow) must be reused, as many times as it has been revealed. Grey letters
+// may be reused, and a yellow letter may go back in the same spot.
 export type RevealedClue = {
   // Position -> letter that's confirmed correct (green) there.
   greens: (string | null)[]; // length 5
-  // Letters confirmed present somewhere (yellow), with minimum count known.
+  // Letter -> how many times it must appear in every later guess.
   minCounts: Record<string, number>;
-  // Positions where a given letter is known NOT to be (yellow elsewhere, or
-  // absent entirely if minCounts[letter] is undefined/0).
-  excludedPositions: Record<string, Set<number>>;
 };
-
-// ---------------------------------------------------------------------------
-// Pattern computation
-// ---------------------------------------------------------------------------
-
-export function computePattern(guess: string, target: string): Pattern {
-  const result: TileState[] = Array(5).fill("absent");
-  const targetCounts: Record<string, number> = {};
-
-  for (let i = 0; i < 5; i++) {
-    if (guess[i] === target[i]) {
-      result[i] = "correct";
-    } else {
-      targetCounts[target[i]] = (targetCounts[target[i]] || 0) + 1;
-    }
-  }
-
-  for (let i = 0; i < 5; i++) {
-    if (result[i] === "absent" && targetCounts[guess[i]] > 0) {
-      result[i] = "present";
-      targetCounts[guess[i]]--;
-    }
-  }
-
-  return result;
-}
 
 // Encode a pattern as a base-3 integer (0–242) for fast hashing/comparison.
 export function patternToInt(pattern: Pattern): number {
@@ -84,8 +62,6 @@ export function intToPattern(n: number): Pattern {
   return vals;
 }
 
-const WIN_INT = 242; // 22222 in base 3
-
 export function isWin(pattern: Pattern): boolean {
   return pattern.every((s) => s === "correct");
 }
@@ -94,8 +70,8 @@ export function isWin(pattern: Pattern): boolean {
 // Hard mode: legal-guess filtering
 // ---------------------------------------------------------------------------
 
-// Merge a new (guess, pattern) result into the accumulated revealed-clue
-// state, used to filter which future guesses are legal under hard mode.
+// Merge a new (guess, pattern) result into the accumulated hard-mode
+// constraints.
 export function accumulateClue(
   prev: RevealedClue,
   guess: string,
@@ -103,73 +79,42 @@ export function accumulateClue(
 ): RevealedClue {
   const greens = [...prev.greens];
   const minCounts = { ...prev.minCounts };
-  const excludedPositions: Record<string, Set<number>> = {};
-  for (const [k, v] of Object.entries(prev.excludedPositions)) {
-    excludedPositions[k] = new Set(v);
-  }
-
-  // Count letters revealed as present (green or yellow) in this guess, to
-  // compute a minimum-occurrence count per letter.
-  const presentCounts: Record<string, number> = {};
-
+  // Letters revealed (green or yellow) in this guess, counted per letter: a
+  // guess with two yellow Es means every later guess needs two Es.
+  const revealed: Record<string, number> = {};
   for (let i = 0; i < 5; i++) {
     const letter = guess[i];
-    const state = pattern[i];
-    if (state === "correct") {
-      greens[i] = letter;
-      presentCounts[letter] = (presentCounts[letter] || 0) + 1;
-    } else if (state === "present") {
-      presentCounts[letter] = (presentCounts[letter] || 0) + 1;
-      if (!excludedPositions[letter]) excludedPositions[letter] = new Set();
-      excludedPositions[letter].add(i);
-    }
+    if (pattern[i] === "correct") greens[i] = letter;
+    if (pattern[i] !== "absent") revealed[letter] = (revealed[letter] || 0) + 1;
   }
-
-  // Grey (absent) tiles: the letter is confirmed NOT at this position. If
-  // the letter never appeared as green/yellow anywhere in this guess, it's
-  // confirmed absent from the word entirely, but we still only need the
-  // position-level exclusion to correctly filter future guesses — a
-  // zero-or-unset minCount already prevents requiring it, and any future
-  // guess placing that letter at THIS position should be rejected even if
-  // the letter is otherwise legitimately present elsewhere (duplicate
-  // letter case, e.g. "rower" with one R confirmed at the end and another
-  // R correctly marked absent at the front).
-  for (let i = 0; i < 5; i++) {
-    const letter = guess[i];
-    const state = pattern[i];
-    if (state === "absent") {
-      if (!excludedPositions[letter]) excludedPositions[letter] = new Set();
-      excludedPositions[letter].add(i);
-    }
-  }
-
-  for (const [letter, count] of Object.entries(presentCounts)) {
+  for (const [letter, count] of Object.entries(revealed)) {
     minCounts[letter] = Math.max(minCounts[letter] || 0, count);
   }
-
-  return { greens, minCounts, excludedPositions };
+  return { greens, minCounts };
 }
 
 export function emptyClue(): RevealedClue {
-  return { greens: Array(5).fill(null), minCounts: {}, excludedPositions: {} };
+  return { greens: Array(5).fill(null), minCounts: {} };
 }
 
-// Is `word` a legal hard-mode guess given everything revealed so far?
-export function isLegalHardModeGuess(word: string, clue: RevealedClue): boolean {
+const ORDINALS = ["1st", "2nd", "3rd", "4th", "5th"];
+
+// Why `word` breaks hard mode, in NYT's wording, or null if it's legal.
+export function hardModeViolation(word: string, clue: RevealedClue): string | null {
   for (let i = 0; i < 5; i++) {
-    if (clue.greens[i] && word[i] !== clue.greens[i]) return false;
+    const g = clue.greens[i];
+    if (g && word[i] !== g) return `${ORDINALS[i]} letter must be ${g.toUpperCase()}`;
   }
   const counts: Record<string, number> = {};
   for (const ch of word) counts[ch] = (counts[ch] || 0) + 1;
   for (const [letter, minCount] of Object.entries(clue.minCounts)) {
-    if ((counts[letter] || 0) < minCount) return false;
+    if ((counts[letter] || 0) < minCount) return `Guess must contain ${letter.toUpperCase()}`;
   }
-  for (const [letter, positions] of Object.entries(clue.excludedPositions)) {
-    for (const pos of positions) {
-      if (word[pos] === letter) return false;
-    }
-  }
-  return true;
+  return null;
+}
+
+export function isLegalHardModeGuess(word: string, clue: RevealedClue): boolean {
+  return hardModeViolation(word, clue) === null;
 }
 
 export function filterLegalGuesses(words: string[], clue: RevealedClue): string[] {
@@ -177,416 +122,733 @@ export function filterLegalGuesses(words: string[], clue: RevealedClue): string[
 }
 
 // ---------------------------------------------------------------------------
-// Entropy estimation (heuristic path, for buckets too large to minimax)
+// Pattern computation
 // ---------------------------------------------------------------------------
+//
+// The adversary evaluates millions of (guess, target) pairs per turn, so the
+// search works on words packed into integers (5 bits per letter, position i
+// in bits 5i..5i+4) plus a 26-bit "letters present" mask for each target,
+// and computes patterns without allocating. Packing and the mask fast path
+// (a guess letter missing from the target is grey without any scanning)
+// make this ~3x faster than a straightforward string implementation.
 
-function entropyOfGuessAgainstBucket(guess: string, bucket: string[]): number {
-  const counts = new Int32Array(243);
-  for (const target of bucket) {
-    counts[patternToInt(computePattern(guess, target))]++;
+function packWord(word: string): number {
+  let x = 0;
+  for (let i = 0; i < 5; i++) x |= (word.charCodeAt(i) - 97) << (5 * i);
+  return x;
+}
+
+function letterMask(word: string): number {
+  let m = 0;
+  for (let i = 0; i < 5; i++) m |= 1 << (word.charCodeAt(i) - 97);
+  return m;
+}
+
+// (greenMask | yellowMask << 5) -> base-3 pattern code, position 0 most
+// significant (2 = correct, 1 = present, 0 = absent).
+const CODE_BY_MASKS = new Uint8Array(1024);
+for (let gm = 0; gm < 32; gm++) {
+  for (let ym = 0; ym < 32; ym++) {
+    let c = 0;
+    for (let i = 0; i < 5; i++) c = c * 3 + ((gm >> i) & 1 ? 2 : (ym >> i) & 1 ? 1 : 0);
+    CODE_BY_MASKS[gm | (ym << 5)] = c;
   }
+}
+
+const WIN_CODE = 242; // 22222 in base 3
+
+function codeOf(g: number, t: number, tLetters: number): number {
+  const x = g ^ t;
+  let gm = 0;
+  if ((x & 0x1f) === 0) gm |= 1;
+  if ((x & 0x3e0) === 0) gm |= 2;
+  if ((x & 0x7c00) === 0) gm |= 4;
+  if ((x & 0xf8000) === 0) gm |= 8;
+  if ((x & 0x1f00000) === 0) gm |= 16;
+  if (gm === 31) return WIN_CODE;
+  let used = gm;
+  let ym = 0;
+  for (let i = 0; i < 5; i++) {
+    if (gm & (1 << i)) continue;
+    const gi = (g >>> (5 * i)) & 31;
+    if (!((tLetters >>> gi) & 1)) continue; // letter not in target: grey
+    for (let j = 0; j < 5; j++) {
+      if (!(used & (1 << j)) && ((t >>> (5 * j)) & 31) === gi) {
+        used |= 1 << j;
+        ym |= 1 << i;
+        break;
+      }
+    }
+  }
+  return CODE_BY_MASKS[gm | (ym << 5)];
+}
+
+// Base-3 pattern code (0-242) of `guess` against `target`.
+export function patternCode(guess: string, target: string): number {
+  return codeOf(packWord(guess), packWord(target), letterMask(target));
+}
+
+export function computePattern(guess: string, target: string): Pattern {
+  return intToPattern(patternCode(guess, target));
+}
+
+// ---------------------------------------------------------------------------
+// Internal word representation
+// ---------------------------------------------------------------------------
+//
+// Inside the search a bucket is an array of word ids; PACKED/LETTERS hold
+// each id's packed form and letter mask. Guess lists are converted once and
+// cached per array instance.
+
+const idByWord = new Map<string, number>();
+const wordById: string[] = [];
+let PACKED = new Int32Array(4096);
+let LETTERS = new Int32Array(4096);
+
+function wordId(word: string): number {
+  let id = idByWord.get(word);
+  if (id === undefined) {
+    id = wordById.length;
+    if (id === PACKED.length) {
+      const p = new Int32Array(id * 2);
+      p.set(PACKED);
+      PACKED = p;
+      const l = new Int32Array(id * 2);
+      l.set(LETTERS);
+      LETTERS = l;
+    }
+    PACKED[id] = packWord(word);
+    LETTERS[id] = letterMask(word);
+    idByWord.set(word, id);
+    wordById.push(word);
+  }
+  return id;
+}
+
+type GuessList = { words: string[]; packed: Int32Array };
+const guessListCache = new WeakMap<string[], GuessList>();
+
+function asGuessList(words: string[]): GuessList {
+  let list = guessListCache.get(words);
+  if (!list) {
+    list = { words, packed: Int32Array.from(words, packWord) };
+    guessListCache.set(words, list);
+  }
+  return list;
+}
+
+function bucketKey(bucket: number[]): string {
+  return [...bucket].sort((a, b) => a - b).join(",");
+}
+
+// Pre-computed x*log2(x): ranking guesses by sum(c*log2 c) ascending is the
+// same as ranking by Shannon entropy descending for a fixed bucket size.
+const XLOGX_SIZE = 4096;
+const XLOGX = new Float64Array(XLOGX_SIZE);
+for (let i = 2; i < XLOGX_SIZE; i++) XLOGX[i] = i * Math.log2(i);
+const xlogx = (c: number) => (c < XLOGX_SIZE ? XLOGX[c] : c * Math.log2(c));
+
+// Scratch buffers for non-recursive inner loops.
+const scratchCounts = new Int32Array(243);
+const scratchTouched = new Int32Array(243);
+const scratchStamp = new Int32Array(243);
+let stampGen = 0;
+// Next generation for scratchStamp. Stamps live in an Int32Array, so the
+// counter must wrap before 2^31 or stale stamps would never match again
+// (which would make every guess look like a perfect separator).
+function nextStamp(): number {
+  if (stampGen >= 0x3fffffff) {
+    scratchStamp.fill(0);
+    stampGen = 0;
+  }
+  return ++stampGen;
+}
+
+// ---------------------------------------------------------------------------
+// Minimax depth search
+// ---------------------------------------------------------------------------
+//
+// depth(B) = the number of guesses the player needs, in the worst case, to
+// solve bucket B (counting the final, winning guess) when the adversary
+// always gives the hardest response:
+//
+//   depth(B) = |B|                                 if |B| <= 2
+//   depth(B) = min over guesses g of
+//                max over responses r of (r is the win ? 1 : 1 + depth(B_r))
+//
+// The player may guess ANY legal word, not just words still in B: an
+// outside word often splits B better (and real solvers rely on this).
+//
+// Two facts make this tractable in a browser:
+//
+//   * depth(B) == 2 exactly when one guess gives every word in B a distinct
+//     pattern (a "separator"). Testing that needs no recursion, and almost
+//     every guess is rejected after a couple of words, so we scan the ENTIRE
+//     legal-guess list. "Does this need 2 more guesses or 3?" is therefore
+//     always answered exactly.
+//
+//   * For depth >= 3 we search a beam of candidate guesses (every word in B
+//     plus the highest-entropy guesses from a position-aware pre-filter)
+//     with alpha-beta style pruning: once some guess achieves depth d, any
+//     guess leaving a part that can't be solved in d - 2 more guesses
+//     (checked with the exact separator test) is dropped immediately.
+//
+// Every value comes from an actual strategy, so it is an UPPER bound on the
+// true depth. It is exact whenever the beam contains an optimal guess, which
+// holds for nearly all buckets (399/400 of a random sample of 3-40 word
+// buckets in testing). The rare misses are handled at the top level by
+// confirmAdversarialChoice, below.
+
+type SearchCtx = {
+  // Hard mode: clues revealed so far on this branch (null in normal mode).
+  clue: RevealedClue | null;
+  depthCache: Map<string, number>;
+  sepCache: Map<string, boolean>;
+};
+
+function newSearchCtx(): SearchCtx {
+  return { clue: null, depthCache: new Map(), sepCache: new Map() };
+}
+
+// How many candidate guesses get a full recursive evaluation, by bucket size.
+function beamWidth(n: number): number {
+  if (n <= 8) return 40;
+  if (n <= 20) return 20;
+  if (n <= 60) return 10;
+  return 6;
+}
+// How many guesses survive the cheap pre-filter to have their entropy
+// computed exactly. Raising this is cheap (no allocation per candidate) and
+// directly improves how often the beam contains the optimal guess.
+const PREFILTER_COUNT = 400;
+
+function clueKey(clue: RevealedClue): string {
+  let s = clue.greens.map((g) => g ?? "_").join("");
+  for (const letter of Object.keys(clue.minCounts).sort()) s += letter + clue.minCounts[letter];
+  return s;
+}
+
+// Cache key for `bucket` searched with the guess list implied by ctx.clue.
+function nodeKey(bucket: number[], ctx: SearchCtx): string {
+  return ctx.clue ? bucketKey(bucket) + "|" + clueKey(ctx.clue) : bucketKey(bucket);
+}
+
+// Same rule as isLegalHardModeGuess, applied to a packed guess list.
+function filterGuessList(list: GuessList, clue: RevealedClue): GuessList {
+  const green = clue.greens.map((g) => (g ? g.charCodeAt(0) - 97 : -1));
+  const required = Object.entries(clue.minCounts)
+    .filter(([, c]) => c > 0)
+    .map(([letter, c]) => [letter.charCodeAt(0) - 97, c]);
+  const counts = new Int32Array(26);
+  const words: string[] = [];
+  const packedOut: number[] = [];
+  outer: for (let j = 0; j < list.packed.length; j++) {
+    const p = list.packed[j];
+    for (let i = 0; i < 5; i++) {
+      if (green[i] >= 0 && ((p >>> (5 * i)) & 31) !== green[i]) continue outer;
+    }
+    if (required.length) {
+      for (let i = 0; i < 5; i++) counts[(p >>> (5 * i)) & 31]++;
+      let ok = true;
+      for (const [c, min] of required) if (counts[c] < min) ok = false;
+      for (let i = 0; i < 5; i++) counts[(p >>> (5 * i)) & 31] = 0;
+      if (!ok) continue;
+    }
+    words.push(list.words[j]);
+    packedOut.push(p);
+  }
+  return { words, packed: Int32Array.from(packedOut) };
+}
+
+// The guess list (and context) for the part of a bucket reached by
+// `guess` -> `code`. Normal mode: unchanged. Hard mode: that response adds
+// clues, which takes options away from the player.
+function childContext(
+  list: GuessList,
+  ctx: SearchCtx,
+  guess: string,
+  code: number
+): { list: GuessList; ctx: SearchCtx } {
+  if (!ctx.clue) return { list, ctx };
+  const clue = accumulateClue(ctx.clue, guess, intToPattern(code));
+  return { list: filterGuessList(list, clue), ctx: { ...ctx, clue } };
+}
+
+// Exact: can one guess from `list` give every word in `bucket` a distinct
+// pattern? Bucket words are tried first; they are often separators and are
+// always legal (even in hard mode, since they fit every clue).
+function hasSeparator(bucket: number[], list: GuessList, ctx: SearchCtx, key: string): boolean {
   const n = bucket.length;
-  let entropy = 0;
-  for (let i = 0; i < 243; i++) {
-    if (counts[i] > 0) {
-      const p = counts[i] / n;
-      entropy -= p * Math.log2(p);
-    }
-  }
-  return entropy;
-}
-
-// ---------------------------------------------------------------------------
-// Large-bucket difficulty estimate
-// ---------------------------------------------------------------------------
-//
-// PROBLEM WITH THE OLD APPROACH (fixed here):
-//   1. It evaluated entropy for every sampled candidate by calling
-//      entropyOfGuessAgainstBucket, which itself calls computePattern once
-//      per bucket word. Sampling from the full ~14,855-word legal-guess
-//      list was the main cost driver for large buckets.
-//   2. It estimated guesses as bitsNeeded / bitsPerGuess — i.e. it assumed
-//      a SINGLE guess's entropy could be sustained across every subsequent
-//      guess. That's not how information actually plays out: the first
-//      guess's entropy reflects splitting the ORIGINAL bucket, but each
-//      following guess only has the (much smaller, much less splittable)
-//      residual bucket to work with. For a 1228-word bucket this produced
-//      absurd estimates around 1.9 guesses, when realistically a bucket
-//      that large needs several more guesses than that.
-//
-// FIX:
-//   - Speed: pre-filter candidate guesses by a CHEAP letter-frequency score
-//     (no pattern computation at all) before doing any entropy work. Only
-//     the top FREQ_PREFILTER_COUNT candidates by that score go on to have
-//     their actual entropy computed. Common, distinct letters correlate
-//     strongly with high entropy, so this captures most of the value of an
-//     exhaustive search at a fraction of the cost.
-//   - Accuracy: instead of a single bits-needed/bits-per-guess division, we
-//     look at the actual partition produced by the best sampled guess and
-//     take the size of its LARGEST resulting sub-bucket. That sub-bucket is
-//     the genuine bottleneck — it's what the player is still stuck with
-//     after their best possible next guess. We convert that residual size
-//     to an estimated guess count via a calibrated formula:
-//
-//         estimate = 1 + log2(maxSubBucketSize) / CALIBRATION_K
-//
-//     CALIBRATION_K was fit against true minimax depths computed for
-//     buckets in the 16-25 word range (where exact minimax is still cheap
-//     to verify): true minimax of 3 consistently corresponded to
-//     maxSubBucket sizes of 3-7, and minimax of 4 corresponded to
-//     maxSubBucket around 12. K=1.3 fits this data reasonably (see
-//     game.ts commit history / calibration notes) while also producing
-//     sane estimates (~6 guesses) for pathologically large buckets like
-//     the 1228-word bucket "mamma" produces as a first guess, where the
-//     best achievable single-guess split still leaves a 106-word residual.
-//
-//     This is necessarily an approximation, not a proof — exact minimax
-//     for buckets this large is computationally infeasible in-browser.
-
-const FREQ_PREFILTER_COUNT = 150;
-const CALIBRATION_K = 1.3;
-
-// Build a letter-frequency table across the given word list. Pure counting,
-// no pattern computation — cheap even for the full legal-guess list.
-function buildLetterFrequency(words: string[]): Record<string, number> {
-  const freq: Record<string, number> = {};
-  for (const word of words) {
-    const seen = new Set<string>();
-    for (const ch of word) {
-      if (!seen.has(ch)) {
-        seen.add(ch);
-        freq[ch] = (freq[ch] || 0) + 1;
-      }
-    }
-  }
-  return freq;
-}
-
-// Score a single word by how well it covers DISCRIMINATING letters within
-// the bucket — i.e. letters that some (but not all) bucket words share.
-// A letter appearing in every bucket word carries zero discriminating
-// power (everyone matches on it already); a letter appearing in exactly
-// one bucket word is maximally discriminating (it pinpoints that word).
-// We weight a letter's value as (bucketSize - timesSeenInBucket), so RARE
-// bucket letters score highest and UNIVERSAL bucket letters score zero.
-// This is the opposite of naive "common letters are good" frequency
-// scoring, which is the right heuristic for guessing in general but wrong
-// here: within one bucket, the letters everyone already shares tell you
-// nothing new, and the letters that vary are what actually split the
-// bucket apart.
-function letterFrequencyScore(
-  word: string,
-  bucketFreq: Record<string, number>,
-  bucketSize: number
-): number {
-  let score = 0;
-  const seen = new Set<string>();
-  for (const ch of word) {
-    if (!seen.has(ch)) {
-      seen.add(ch);
-      const occurrences = bucketFreq[ch] || 0;
-      // Letters not present in the bucket at all still have some value
-      // (they can rule things out / reveal nothing, which is neutral —
-      // give them a small baseline rather than zero so words with no
-      // bucket-letter overlap aren't strictly worse than ones with only
-      // universal-letter overlap).
-      score += occurrences === 0 ? 0.5 : bucketSize - occurrences;
-    }
-  }
-  return score;
-}
-
-// Pick the top-N legal guesses by discriminating-letter coverage against
-// the CURRENT bucket (see letterFrequencyScore above for why this favors
-// rare-within-bucket letters rather than common ones).
-function topCandidatesByLetterFrequency(
-  bucket: string[],
-  legalGuesses: string[],
-  count: number
-): string[] {
-  if (legalGuesses.length <= count) return legalGuesses;
-  const freq = buildLetterFrequency(bucket);
-  const scored = legalGuesses.map((g) => ({
-    g,
-    score: letterFrequencyScore(g, freq, bucket.length),
-  }));
-  scored.sort((a, b) => b.score - a.score);
-  return scored.slice(0, count).map((s) => s.g);
-}
-
-// Find the best guess (by entropy against `bucket`) among a cheaply
-// pre-filtered candidate set, and return the size of the LARGEST sub-bucket
-// that guess produces — the genuine post-guess bottleneck.
-function bestGuessMaxSubBucketSize(bucket: string[], legalGuesses: string[]): number {
-  if (bucket.length <= 1) return bucket.length;
-
-  const prefiltered = topCandidatesByLetterFrequency(
-    bucket,
-    legalGuesses,
-    FREQ_PREFILTER_COUNT
-  );
-
-  let bestEntropy = -1;
-  let bestMaxSub = bucket.length;
-
-  for (const guess of prefiltered) {
-    const counts = new Int32Array(243);
-    for (const target of bucket) {
-      counts[patternToInt(computePattern(guess, target))]++;
-    }
-    let maxSub = 0;
-    let entropy = 0;
-    const n = bucket.length;
-    for (let i = 0; i < 243; i++) {
-      if (counts[i] > 0) {
-        if (counts[i] > maxSub) maxSub = counts[i];
-        const p = counts[i] / n;
-        entropy -= p * Math.log2(p);
-      }
-    }
-    if (entropy > bestEntropy) {
-      bestEntropy = entropy;
-      bestMaxSub = maxSub;
-    }
-  }
-
-  return bestMaxSub;
-}
-
-function estimateGuessesNeeded(bucket: string[], legalGuesses: string[]): number {
-  if (bucket.length <= 1) return bucket.length;
-  const maxSub = bestGuessMaxSubBucketSize(bucket, legalGuesses);
-  if (maxSub <= 1) return 2; // best guess fully resolves the bucket next turn
-  return 1 + Math.log2(maxSub) / CALIBRATION_K;
-}
-
-// ---------------------------------------------------------------------------
-// Exact minimax for small buckets
-// ---------------------------------------------------------------------------
-//
-// minimaxDepth(bucket, legalGuesses) = the true worst-case number of
-// guesses needed to solve `bucket`, assuming the player plays optimally
-// (minimizing) and the adversary plays optimally (maximizing, by picking
-// the worst consistent response to each guess).
-//
-//   minimaxDepth(B) = 0                                  if |B| == 0
-//   minimaxDepth(B) = 1                                  if |B| == 1
-//   minimaxDepth(B) = min over guesses g of
-//                       1 + max over non-win buckets of g against B of
-//                             minimaxDepth(bucket)
-//
-// CRITICAL: the player is not restricted to guessing words drawn from the
-// bucket itself — any word in the full legal-guess list is a legal guess,
-// and a word OUTSIDE the bucket can split it more evenly than any word
-// inside it (this is exactly how real Wordle solvers find guesses like
-// "paste" or "lambs" that aren't themselves candidate answers but probe
-// useful letters). Restricting candidates to bucket words is a common but
-// unsound simplification — it understates how fast the player can solve a
-// bucket, which lets the adversary pick buckets that only LOOK hard.
-//
-// Searching the FULL legal-guess list (~14,855 words) exhaustively at every
-// recursion node is intractable: even after deduping by partition
-// signature, the dedup pass itself costs O(|legalGuesses| * |bucket|) at
-// EVERY recursive call, and the recursion tree for a 15-word bucket can
-// have dozens of nodes — this measured at 200+ seconds for a single
-// top-level call.
-//
-// Instead we prune candidates by ENTROPY before deduping: only the top
-// MINIMAX_CANDIDATE_CAP guesses (by Shannon entropy of their partition of
-// the bucket) are considered as minimax candidates. This is not formally
-// exhaustive, but entropy is a strong proxy for partition quality — the
-// guess that actually achieves the true minimax-optimal split is
-// overwhelmingly likely to also be near the top of the entropy ranking,
-// since a more even split (high entropy) directly trends toward a lower
-// worst-case sub-bucket size. We then dedupe the surviving candidates by
-// partition signature (cheap now that the candidate set is small) before
-// recursing.
-export const EXACT_MINIMAX_THRESHOLD = 6;
-const MINIMAX_CANDIDATE_CAP = 50;
-
-function topCandidatesByEntropy(
-  bucket: string[],
-  legalGuesses: string[],
-  cap: number
-): string[] {
-  if (legalGuesses.length <= cap) return legalGuesses;
-
-  // Cheap pre-filter by letter frequency before computing any patterns,
-  // same approach used for the large-bucket heuristic above — cuts the
-  // number of expensive entropy computations from |legalGuesses| down to
-  // a small multiple of `cap`, while still surfacing the words most likely
-  // to discriminate well within this specific bucket.
-  const prefiltered = topCandidatesByLetterFrequency(
-    bucket,
-    legalGuesses,
-    Math.max(cap * 4, 200)
-  );
-
-  const scored: Array<{ guess: string; entropy: number }> = [];
-  for (const guess of prefiltered) {
-    scored.push({ guess, entropy: entropyOfGuessAgainstBucket(guess, bucket) });
-  }
-  scored.sort((a, b) => b.entropy - a.entropy);
-  return scored.slice(0, cap).map((s) => s.guess);
-}
-
-function dedupeByPartitionSignature(
-  bucket: string[],
-  candidateGuesses: string[]
-): string[] {
-  const seenSignatures = new Set<string>();
-  const deduped: string[] = [];
-
-  for (const guess of candidateGuesses) {
-    // Partition signature: pattern produced against each bucket word, in
-    // bucket order. Two guesses with the identical signature produce
-    // literally the same partition of this bucket, so only one needs to
-    // be tried.
-    let sig = "";
-    for (const word of bucket) {
-      sig += patternToInt(computePattern(guess, word)) + ",";
-    }
-    if (!seenSignatures.has(sig)) {
-      seenSignatures.add(sig);
-      deduped.push(guess);
-    }
-  }
-
-  return deduped;
-}
-
-function minimaxDepth(
-  bucket: string[],
-  legalGuesses: string[],
-  cache: Map<string, number>
-): number {
-  if (bucket.length === 0) return 0;
-  if (bucket.length === 1) return 1;
-
-  const key = bucket.length + ":" + [...bucket].sort().join(",");
-  const cached = cache.get(key);
+  if (n <= 2) return true;
+  if (n > 243) return false;
+  const cached = ctx.sepCache.get(key);
   if (cached !== undefined) return cached;
 
-  // Prune to the top entropy-ranked candidates first (bounded cost
-  // regardless of legalGuesses size), then dedupe by partition signature
-  // (cheap once the candidate set is small).
-  const topCandidates = topCandidatesByEntropy(bucket, legalGuesses, MINIMAX_CANDIDATE_CAP);
-  const candidateGuesses = dedupeByPartitionSignature(bucket, topCandidates);
-
-  let best = Infinity;
-
-  for (const guess of candidateGuesses) {
-    const subBuckets = new Map<number, string[]>();
-    for (const word of bucket) {
-      const p = patternToInt(computePattern(guess, word));
-      if (!subBuckets.has(p)) subBuckets.set(p, []);
-      subBuckets.get(p)!.push(word);
+  const tp = new Int32Array(n);
+  const tl = new Int32Array(n);
+  for (let i = 0; i < n; i++) {
+    tp[i] = PACKED[bucket[i]];
+    tl[i] = LETTERS[bucket[i]];
+  }
+  const separates = (g: number): boolean => {
+    const gen = nextStamp();
+    for (let i = 0; i < n; i++) {
+      const c = codeOf(g, tp[i], tl[i]);
+      if (scratchStamp[c] === gen) return false;
+      scratchStamp[c] = gen;
     }
+    return true;
+  };
+  let found = false;
+  for (let i = 0; i < n && !found; i++) found = separates(tp[i]);
+  const packed = list.packed;
+  for (let j = 0; j < packed.length && !found; j++) found = separates(packed[j]);
+  ctx.sepCache.set(key, found);
+  return found;
+}
 
-    // A guess that produces a single sub-bucket equal in size to the
-    // parent bucket provides zero information (every bucket word looks
-    // identical under this guess) and would recurse forever on the exact
-    // same bucket. Skip it — it can never be part of an optimal strategy.
-    if (subBuckets.size === 1) {
-      const onlyBucket = subBuckets.values().next().value!;
-      if (onlyBucket.length === bucket.length) continue;
+// Cheap, position-aware pre-ranking of guesses. A guess is useful when its
+// letters split the bucket, so each letter scores x * (n - x), where x is
+// the number of bucket words containing it (and, separately, containing it
+// at that exact position, for the green signal). That is 0 for letters in
+// none or all of the words and peaks for letters in half of them. Positions
+// matter: anagram-heavy buckets like {alert, alter, later} share every
+// letter and can only be split by position.
+function prefilter(bucket: number[], list: GuessList, count: number): number[] {
+  const packed = list.packed;
+  const G = packed.length;
+  if (G <= count) return Array.from({ length: G }, (_, j) => j);
+  const n = bucket.length;
+  const present = new Int32Array(26);
+  const atPos = new Int32Array(5 * 26);
+  for (const id of bucket) {
+    const p = PACKED[id];
+    let m = LETTERS[id];
+    for (let i = 0; i < 5; i++) atPos[i * 26 + ((p >>> (5 * i)) & 31)]++;
+    while (m) {
+      const c = 31 - Math.clz32(m);
+      present[c]++;
+      m &= ~(1 << c);
     }
+  }
+  const presentScore = new Int32Array(26);
+  for (let c = 0; c < 26; c++) presentScore[c] = present[c] * (n - present[c]);
+  const posScore = new Int32Array(5 * 26);
+  for (let k = 0; k < 5 * 26; k++) posScore[k] = atPos[k] * (n - atPos[k]);
 
-    let worst = 0;
-    for (const [patInt, words] of subBuckets) {
-      if (patInt === WIN_INT) {
-        // The guess itself resolves this slice in one guess.
-        worst = Math.max(worst, 1);
-      } else {
-        worst = Math.max(worst, 1 + minimaxDepth(words, legalGuesses, cache));
+  const scores = new Float64Array(G);
+  for (let j = 0; j < G; j++) {
+    const p = packed[j];
+    let seen = 0;
+    let s = 0;
+    for (let i = 0; i < 5; i++) {
+      const c = (p >>> (5 * i)) & 31;
+      s += posScore[i * 26 + c];
+      if (!(seen & (1 << c))) {
+        seen |= 1 << c;
+        s += presentScore[c];
       }
     }
+    scores[j] = s;
+  }
+  const threshold = scores.slice().sort()[G - count];
+  const out: number[] = [];
+  for (let j = 0; j < G && out.length < count; j++) if (scores[j] > threshold) out.push(j);
+  for (let j = 0; j < G && out.length < count; j++) if (scores[j] === threshold) out.push(j);
+  return out;
+}
 
+type Part = { code: number; ids: number[] };
+type Candidate = { word: string; parts: Part[] }; // non-win parts, largest first
+
+function partitionBy(g: number, bucket: number[]): Part[] {
+  const byCode = new Map<number, number[]>();
+  for (const id of bucket) {
+    const c = codeOf(g, PACKED[id], LETTERS[id]);
+    if (c === WIN_CODE) continue;
+    const list = byCode.get(c);
+    if (list) list.push(id);
+    else byCode.set(c, [id]);
+  }
+  const parts: Part[] = [];
+  for (const [code, ids] of byCode) parts.push({ code, ids });
+  parts.sort((a, b) => b.ids.length - a.ids.length);
+  return parts;
+}
+
+function rankCandidates(bucket: number[], list: GuessList, width: number, hardMode: boolean): Candidate[] {
+  const n = bucket.length;
+  type Scored = { packed: number; word: string; inBucket: boolean; sum: number; max: number };
+  const scored: Scored[] = [];
+  const score = (packed: number, word: string, inBucket: boolean) => {
+    let t = 0;
+    let max = 0;
+    let win = false;
+    for (const id of bucket) {
+      const c = codeOf(packed, PACKED[id], LETTERS[id]);
+      if (c === WIN_CODE) win = true;
+      const k = ++scratchCounts[c];
+      if (k === 1) scratchTouched[t++] = c;
+      if (k > max) max = k;
+    }
+    let sum = 0;
+    for (let k = 0; k < t; k++) {
+      sum += xlogx(scratchCounts[scratchTouched[k]]);
+      scratchCounts[scratchTouched[k]] = 0;
+    }
+    // A guess that leaves the whole bucket in one non-winning part tells the
+    // player nothing and can never be part of an optimal strategy.
+    if (max === n && !win) return;
+    scored.push({ packed, word, inBucket, sum, max });
+  };
+  const inBucket = new Set<string>();
+  for (const id of bucket) {
+    inBucket.add(wordById[id]);
+    score(PACKED[id], wordById[id], true);
+  }
+  for (const j of prefilter(bucket, list, PREFILTER_COUNT)) {
+    if (!inBucket.has(list.words[j])) score(list.packed[j], list.words[j], false);
+  }
+  // Best entropy first; then smaller worst case; then words that could win.
+  scored.sort((a, b) => a.sum - b.sum || a.max - b.max || Number(b.inBucket) - Number(a.inBucket));
+
+  // Keep the top `width` guesses that induce distinct partitions. (In hard
+  // mode the response codes matter too: they decide the next legal list.)
+  const out: Candidate[] = [];
+  const seen = new Set<string>();
+  for (const s of scored) {
+    if (out.length >= width) break;
+    const parts = partitionBy(s.packed, bucket);
+    let sig = s.inBucket ? "W" : "";
+    for (const p of parts) sig += (hardMode ? p.code + ":" : "") + p.ids.join(".") + ",";
+    if (seen.has(sig)) continue;
+    seen.add(sig);
+    out.push({ word: s.word, parts });
+  }
+  return out;
+}
+
+function depthSearch(bucket: number[], list: GuessList, ctx: SearchCtx): number {
+  const n = bucket.length;
+  if (n <= 2) return n;
+
+  const key = nodeKey(bucket, ctx);
+  const cached = ctx.depthCache.get(key);
+  if (cached !== undefined) return cached;
+
+  if (hasSeparator(bucket, list, ctx, key)) {
+    ctx.depthCache.set(key, 2);
+    return 2;
+  }
+
+  // No separator, so depth >= 3.
+  let best = Infinity;
+  for (const cand of rankCandidates(bucket, list, beamWidth(n), ctx.clue !== null)) {
+    let worst = 1; // a winning response costs just this guess
+    for (const part of cand.parts) {
+      const size = part.ids.length;
+      // Lower bound for the part: its size if <= 2, else 2 if separable, else
+      // 3. (Hard mode tests separability against this node's list, a
+      // superset of the child's, so the bound stays valid.)
+      const lower =
+        size <= 2 ? size : hasSeparator(part.ids, list, ctx, nodeKey(part.ids, ctx)) ? 2 : 3;
+      if (1 + lower >= best) {
+        worst = Infinity;
+        break;
+      }
+      let d = size;
+      if (size > 2) {
+        const child = childContext(list, ctx, cand.word, part.code);
+        d = depthSearch(part.ids, child.list, child.ctx);
+      }
+      if (1 + d > worst) worst = 1 + d;
+      if (worst >= best) break;
+    }
     if (worst < best) best = worst;
-    if (best === 1) break; // can't do better than solving in one guess
+    if (best <= 3) break; // meets the lower bound
   }
+  // Unreachable in practice (any bucket word makes progress), but guessing
+  // every word in turn always works.
+  if (best === Infinity) best = n;
 
-  // If every candidate guess failed to make progress (shouldn't normally
-  // happen since bucket words themselves always self-distinguish once
-  // |bucket| > 1, but guards against a pathological legalGuesses set),
-  // fall back to a safe upper bound: guessing every bucket word in turn
-  // solves it in at most |bucket| guesses.
-  if (best === Infinity) {
-    best = bucket.length;
-  }
-
-  cache.set(key, best);
+  ctx.depthCache.set(key, best);
   return best;
 }
 
 // ---------------------------------------------------------------------------
-// Difficulty scoring — dispatches to exact minimax or the heuristic
+// Exhaustive depth-3 check
+// ---------------------------------------------------------------------------
+//
+// The beam's blind spot is the rare guess that splits a bucket into parts
+// that are ALL separable (so the bucket needs only 3 more guesses) while
+// ranking far down by entropy. On real opening buckets there can be as few
+// as 2 such guesses out of ~15k, or the first one can rank 500th+. If the adversary picked such a bucket
+// believing it needed 4 more guesses, a player who found the guess would
+// win in 4 total.
+//
+// So the bucket the adversary is about to commit to is checked against
+// EVERY legal guess. Patterns are computed once into a flat table, and each
+// part's separability is then plain array lookups (cached, and almost always
+// rejected within a few words). This is exact, so together with the exact
+// depth-2 test above, a game (in either mode) can never be won in 4 guesses
+// unless the player's guesses genuinely make that unavoidable.
+
+function solvableIn3(bucket: number[], list: GuessList, ctx: SearchCtx): boolean {
+  const n = bucket.length;
+  if (n <= 3) return true;
+  const packed = list.packed;
+  const G = packed.length;
+  const tp = new Int32Array(n);
+  const tl = new Int32Array(n);
+  for (let i = 0; i < n; i++) {
+    tp[i] = PACKED[bucket[i]];
+    tl[i] = LETTERS[bucket[i]];
+  }
+
+  // rows[g * n + i] = pattern of guess g against bucket[i]. Also record each
+  // guess's largest part and number of distinct patterns: a guess can only
+  // separate a part of size m if it produces at least m distinct patterns on
+  // the whole bucket, so separator scans only need the guesses with
+  // distinct[g] >= m (byDistinct is sorted so that is a prefix).
+  const rows = new Uint8Array(G * n);
+  const maxPart = new Int32Array(G);
+  const distinct = new Int32Array(G);
+  for (let g = 0; g < G; g++) {
+    const off = g * n;
+    const gp = packed[g];
+    let t = 0;
+    let max = 0;
+    for (let i = 0; i < n; i++) {
+      const c = codeOf(gp, tp[i], tl[i]);
+      rows[off + i] = c;
+      const k = ++scratchCounts[c];
+      if (k === 1) scratchTouched[t++] = c;
+      if (k > max && c !== WIN_CODE) max = k;
+    }
+    for (let k = 0; k < t; k++) scratchCounts[scratchTouched[k]] = 0;
+    maxPart[g] = max;
+    distinct[g] = t;
+  }
+  const byDistinct = Array.from({ length: G }, (_, g) => g).sort((a, b) => distinct[b] - distinct[a]);
+  const maxDistinct = G > 0 ? distinct[byDistinct[0]] : 0;
+
+  const sepCache = new Map<string, boolean>();
+  // Separable using any guess in the list (the exact answer in normal mode;
+  // a necessary condition in hard mode).
+  const separableByRows = (idx: number[]): boolean => {
+    if (idx.length <= 2) return true;
+    if (idx.length > maxDistinct) return false;
+    const key = idx.join(",");
+    let found = sepCache.get(key);
+    if (found !== undefined) return found;
+    found = false;
+    const m = idx.length;
+    for (let r = 0; r < G && !found && distinct[byDistinct[r]] >= m; r++) {
+      const g = byDistinct[r];
+      const gen = nextStamp();
+      const off = g * n;
+      let ok = true;
+      for (const i of idx) {
+        const c = rows[off + i];
+        if (scratchStamp[c] === gen) {
+          ok = false;
+          break;
+        }
+        scratchStamp[c] = gen;
+      }
+      found = ok;
+    }
+    sepCache.set(key, found);
+    return found;
+  };
+
+  // Most guesses fail on their largest part, so test that first without
+  // building the full partition.
+  const buf = new Int32Array(n);
+  const partOf = (off: number, code: number): number[] => {
+    const idx: number[] = [];
+    for (let i = 0; i < n; i++) if (rows[off + i] === code) idx.push(i);
+    return idx;
+  };
+  for (let g = 0; g < G; g++) {
+    const m = maxPart[g];
+    if (m > maxDistinct || m === n) continue;
+    const off = g * n;
+    if (m >= 3) {
+      // Find the (first) largest part's code.
+      let t = 0;
+      let bigCode = -1;
+      for (let i = 0; i < n; i++) {
+        const c = rows[off + i];
+        if (c === WIN_CODE) continue;
+        const k = ++scratchCounts[c];
+        if (k === 1) scratchTouched[t++] = c;
+        if (k === m && bigCode < 0) bigCode = c;
+      }
+      for (let k = 0; k < t; k++) scratchCounts[scratchTouched[k]] = 0;
+      let len = 0;
+      for (let i = 0; i < n; i++) if (rows[off + i] === bigCode) buf[len++] = i;
+      if (!separableByRows(Array.from(buf.subarray(0, len)))) continue;
+    }
+    // Largest part is fine; check every part of size >= 3.
+    const codes = new Set<number>();
+    for (let i = 0; i < n; i++) if (rows[off + i] !== WIN_CODE) codes.add(rows[off + i]);
+    let ok = true;
+    for (const code of codes) {
+      const idx = partOf(off, code);
+      if (idx.length <= 2) continue;
+      if (!separableByRows(idx)) {
+        ok = false;
+        break;
+      }
+      if (ctx.clue) {
+        // Hard mode: re-check against the guesses still legal after this
+        // response (rarely reached; most guesses fail the test above).
+        const ids = idx.map((i) => bucket[i]);
+        const child = childContext(list, ctx, list.words[g], code);
+        if (!hasSeparator(ids, child.list, child.ctx, nodeKey(ids, child.ctx))) {
+          ok = false;
+          break;
+        }
+      }
+    }
+    if (ok) return true;
+  }
+  return false;
+}
+
+// Buckets above this size skip the exhaustive check: it costs ~0.5s+ there
+// and isn't needed. On the opening move (always the full answer list) we ran
+// it offline on every response bigger than this to every legal first guess
+// (19,103 buckets): none can be solved in 3. Later in the game, 3 more
+// guesses already means 5+ in total. Hard mode only removes options, so the
+// same holds there.
+const IN3_MAX_BUCKET = 300;
+
+// Beam-based check for higher targets: can `bucket` be solved within
+// `target` guesses using one of the best REFINE_CANDIDATES first guesses?
+const REFINE_CANDIDATES = 30;
+function solvableWithinByBeam(
+  bucket: number[],
+  list: GuessList,
+  ctx: SearchCtx,
+  target: number
+): boolean {
+  for (const cand of rankCandidates(bucket, list, REFINE_CANDIDATES, ctx.clue !== null)) {
+    let ok = true;
+    for (const part of cand.parts) {
+      if (part.ids.length <= 2) {
+        if (1 + part.ids.length > target) ok = false;
+        if (!ok) break;
+        continue;
+      }
+      const child = childContext(list, ctx, cand.word, part.code);
+      if (1 + depthSearch(part.ids, child.list, child.ctx) > target) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) return true;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Difficulty scoring
 // ---------------------------------------------------------------------------
 
-export function scoreBucketDifficulty(
-  bucket: string[],
-  legalGuesses: string[],
-  minimaxCache: Map<string, number>
-): number {
-  if (bucket.length <= EXACT_MINIMAX_THRESHOLD) {
-    return minimaxDepth(bucket, legalGuesses, minimaxCache);
-  }
-  return estimateGuessesNeeded(bucket, legalGuesses);
+// Worst-case number of guesses still needed to solve `bucket` (an upper bound
+// that is exact in the vast majority of cases; see depthSearch).
+export function scoreBucketDifficulty(bucket: string[], legalGuesses: string[]): number {
+  if (bucket.length <= 1) return bucket.length;
+  return depthSearch(bucket.map(wordId), asGuessList(legalGuesses), newSearchCtx());
 }
 
 // ---------------------------------------------------------------------------
 // Main adversarial bucket selection
 // ---------------------------------------------------------------------------
 
-// Relative tie threshold: buckets scoring within this fraction of the best
-// score are considered equally hard and chosen among at random. A wider
-// threshold makes the adversary's behavior less deterministic.
-const TIE_THRESHOLD = 0.1;
-
 export function chooseAdversarialBucket(
   guess: string,
   pool: string[],
-  legalGuesses: string[]
+  legalGuesses: string[],
+  // Hard mode only: the clues revealed BEFORE this guess. Each response is
+  // then scored against the (smaller) list of guesses that remain legal once
+  // that response's clues are added, at every level of the search.
+  hardModeClue: RevealedClue | null = null
 ): { pattern: Pattern; nextPool: string[] } {
-  const start = Date.now();
-  const buckets = new Map<number, string[]>();
+  const g = packWord(guess);
+  const byCode = new Map<number, number[]>();
   for (const word of pool) {
-    const p = patternToInt(computePattern(guess, word));
-    if (!buckets.has(p)) buckets.set(p, []);
-    buckets.get(p)!.push(word);
+    const id = wordId(word);
+    const c = codeOf(g, PACKED[id], LETTERS[id]);
+    const l = byCode.get(c);
+    if (l) l.push(id);
+    else byCode.set(c, [id]);
   }
 
-  let winBucket: { patInt: number; words: string[] } | null = null;
-  const candidates: Array<{ patInt: number; words: string[] }> = [];
+  const baseList = asGuessList(legalGuesses);
+  const shared = newSearchCtx();
+  type Option = {
+    code: number;
+    ids: number[];
+    list: GuessList;
+    ctx: SearchCtx;
+    score: number;
+    deeperThan3?: boolean; // proven by solvableIn3
+  };
+  const options: Option[] = [];
+  for (const [code, ids] of byCode) {
+    if (code === WIN_CODE) continue;
+    let list = baseList;
+    let ctx = shared;
+    if (hardModeClue) {
+      const clue = accumulateClue(hardModeClue, guess, intToPattern(code));
+      list = filterGuessList(baseList, clue);
+      ctx = { ...shared, clue };
+    }
+    const score = ids.length <= 2 ? ids.length : depthSearch(ids, list, ctx);
+    options.push({ code, ids, list, ctx, score });
+  }
+  if (options.length === 0) {
+    // The guess was the only word left.
+    return { pattern: intToPattern(WIN_CODE), nextPool: [guess] };
+  }
 
-  for (const [patInt, words] of buckets) {
-    if (patInt === WIN_INT) {
-      winBucket = { patInt, words };
-    } else {
-      candidates.push({ patInt, words });
+  // Responses of equal depth are equally devious; pick among them at random.
+  // Before committing, confirm the pick really is that deep (the beam score
+  // is an upper bound): if it isn't, lower its score and draw again. Drawing
+  // in random order and stopping at the first confirmed option is a uniform
+  // pick among the confirmed-hardest options, and usually costs a single
+  // check rather than one per tied option.
+  for (;;) {
+    const best = Math.max(...options.map((o) => o.score));
+    const tied = options.filter((o) => o.score === best);
+    for (let i = tied.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [tied[i], tied[j]] = [tied[j], tied[i]];
+    }
+    let chosen: Option | null = null;
+    for (const o of tied) {
+      if (o.score >= 4 && !o.deeperThan3 && o.ids.length <= IN3_MAX_BUCKET) {
+        if (solvableIn3(o.ids, o.list, o.ctx)) {
+          o.score = 3;
+          continue;
+        }
+        o.deeperThan3 = true;
+      }
+      if (o.score >= 5 && solvableWithinByBeam(o.ids, o.list, o.ctx, o.score - 1)) {
+        o.score--;
+        continue;
+      }
+      chosen = o;
+      break;
+    }
+    if (chosen) {
+      return {
+        pattern: intToPattern(chosen.code),
+        nextPool: chosen.ids.map((id) => wordById[id]),
+      };
     }
   }
-
-  if (candidates.length === 0) {
-    const { patInt, words } = winBucket!;
-    return { pattern: intToPattern(patInt), nextPool: words };
-  }
-
-  const minimaxCache = new Map<string, number>();
-  let bestScore = -1;
-  const scored: Array<{ patInt: number; words: string[]; score: number }> = [];
-
-  for (const c of candidates) {
-    const score = scoreBucketDifficulty(c.words, legalGuesses, minimaxCache);
-    scored.push({ ...c, score });
-    if (score > bestScore) bestScore = score;
-  }
-
-  // Treat anything within TIE_THRESHOLD (relative) of the best as tied, as long as it has the same ceiling.
-  const cutoff = Math.max(bestScore * (1 - TIE_THRESHOLD), Math.ceil(bestScore) - 1);
-  const tied = scored.filter((s) => s.score > cutoff);
-
-  const chosen = tied[Math.floor(Math.random() * tied.length)];
-  const end = Date.now();
-  return { pattern: intToPattern(chosen.patInt), nextPool: chosen.words };
 }

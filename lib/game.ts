@@ -755,12 +755,12 @@ function solvableIn3(bucket: number[], list: GuessList, ctx: SearchCtx): boolean
   return false;
 }
 
-// Buckets above this size skip the exhaustive check: it costs ~0.5s+ there,
-// and it isn't needed. On the opening move (always the full answer list) we
-// verified offline, by running solvableIn3 on all IN3_VERIFIED_COUNT
-// responses of every legal first guess that are bigger than this, that none
-// can be solved in 3; later in the game, 3 more guesses already means 5+
-// in total. Hard mode only removes options, so the same holds there.
+// Buckets above this size skip the exhaustive check: it costs ~0.5s+ there
+// and isn't needed. On the opening move (always the full answer list) we ran
+// it offline on every response bigger than this to every legal first guess
+// (19,103 buckets): none can be solved in 3. Later in the game, 3 more
+// guesses already means 5+ in total. Hard mode only removes options, so the
+// same holds there.
 const IN3_MAX_BUCKET = 300;
 
 // Beam-based check for higher targets: can `bucket` be solved within

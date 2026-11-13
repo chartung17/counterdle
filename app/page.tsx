@@ -276,7 +276,7 @@ export default function Home() {
 
                   let bg = "var(--surface)";
                   let fg = "var(--text)";
-                  let borderColor = letter && isCurrent ? "var(--accent)" : "var(--border)";
+                  let borderColor = letter && isCurrent ? "var(--accent)" : "var(--tile-border)";
 
                   if (state === "correct") { bg = "var(--correct)"; fg = "var(--correct-fg)"; borderColor = "var(--correct)"; }
                   else if (state === "present") { bg = "var(--present)"; fg = "var(--present-fg)"; borderColor = "var(--present)"; }
@@ -397,11 +397,11 @@ function OnScreenKeyboard({
 
   const keyStyle = (state: TileState | undefined, width = 32): React.CSSProperties => {
     let bg = "var(--keyboard-unguessed)";
-    let fg = "var(--text)";
-    let border = "var(--border)";
+    let fg = "var(--key-fg)";
+    let border = "var(--keyboard-unguessed)";
     if (state === "correct") { bg = "var(--correct)"; fg = "var(--correct-fg)"; border = "var(--correct)"; }
     else if (state === "present") { bg = "var(--present)"; fg = "var(--present-fg)"; border = "var(--present)"; }
-    else if (state === "absent") { bg = "var(--absent)"; fg = "var(--absent-fg)"; border = "var(--absent)"; }
+    else if (state === "absent") { bg = "var(--absent)"; fg = "var(--absent-key-fg)"; border = "var(--absent)"; }
     return {
       width,
       height: 44,

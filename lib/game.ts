@@ -283,6 +283,16 @@ const scratchCounts = new Int32Array(243);
 const scratchTouched = new Int32Array(243);
 const scratchStamp = new Int32Array(243);
 let stampGen = 0;
+// Next generation for scratchStamp. Stamps live in an Int32Array, so the
+// counter must wrap before 2^31 or stale stamps would never match again
+// (which would make every guess look like a perfect separator).
+function nextStamp(): number {
+  if (stampGen >= 0x3fffffff) {
+    scratchStamp.fill(0);
+    stampGen = 0;
+  }
+  return ++stampGen;
+}
 
 // ---------------------------------------------------------------------------
 // Minimax depth search
@@ -419,7 +429,7 @@ function hasSeparator(bucket: number[], list: GuessList, ctx: SearchCtx, key: st
     tl[i] = LETTERS[bucket[i]];
   }
   const separates = (g: number): boolean => {
-    const gen = ++stampGen;
+    const gen = nextStamp();
     for (let i = 0; i < n; i++) {
       const c = codeOf(g, tp[i], tl[i]);
       if (scratchStamp[c] === gen) return false;
@@ -673,7 +683,7 @@ function solvableIn3(bucket: number[], list: GuessList, ctx: SearchCtx): boolean
     const m = idx.length;
     for (let r = 0; r < G && !found && distinct[byDistinct[r]] >= m; r++) {
       const g = byDistinct[r];
-      const gen = ++stampGen;
+      const gen = nextStamp();
       const off = g * n;
       let ok = true;
       for (const i of idx) {

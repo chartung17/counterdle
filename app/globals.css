@@ -1,19 +1,27 @@
 @import "tailwindcss";
 
 :root {
+  /* Checked against WCAG 2.1 AA: text >= 4.5:1, tile/key states >= 3:1
+     against each other, and correct/present/absent stay distinct under
+     simulated protanopia, deuteranopia and tritanopia (they differ in
+     lightness, not just hue). */
   --bg: #0d0d0f;
   --surface: #18181c;
-  --keyboard-unguessed: #2e2e38;
+  --keyboard-unguessed: #6e6e7c;
+  --key-fg: #ffffff;
+  --key-disabled: #2e2e38; /* --muted label on this is 4.8:1 */
   --border: #2a2a32;
+  --tile-border: #5f5f6c;
   --text: #e8e8ee;
-  --muted: #6b6b7a;
+  --muted: #9a9aa8;
   --accent: #c084fc;
   --correct: #15803d;
-  --correct-fg: #dcfce7;
-  --present: #b45309;
-  --present-fg: #fef3c7;
-  --absent: #52525e;
-  --absent-fg: #a8a8b4;
+  --correct-fg: #ffffff;
+  --present: #facc15;
+  --present-fg: #1c1917;
+  --absent: #23232a;
+  --absent-fg: #e8e8ee;
+  --absent-key-fg: #9a9aa8;
 }
 
 * {

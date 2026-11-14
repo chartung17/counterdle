@@ -479,12 +479,12 @@ function OnScreenKeyboard({
           disabled={!canSubmit}
           style={{
             ...keyStyle(undefined, 160),
-            background: canSubmit ? "var(--accent)" : "var(--keyboard-unguessed)",
+            background: canSubmit ? "var(--accent)" : "var(--key-disabled)",
             color: canSubmit ? "#0d0d0f" : "var(--muted)",
             border: "none",
             fontWeight: 700,
             letterSpacing: "0.1em",
-            opacity: canSubmit ? 1 : 0.5,
+            opacity: 1,
             cursor: canSubmit ? "pointer" : "default",
           }}
         >
